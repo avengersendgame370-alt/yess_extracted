@@ -23,6 +23,7 @@ module.exports = (io) => {
             sdk: null,
             userId: null,
             isScanning: false,
+            sdkInitializing: false,
             metricsBuffer: {
                 heartRates: [],
                 respirationRates: [],
@@ -57,6 +58,8 @@ module.exports = (io) => {
 
             session.isScanning = true;
             session.frameCount = 0;
+            session.sdk = null;
+            session.sdkInitializing = false;
             session.metricsBuffer = {
                 heartRates: [],
                 respirationRates: [],
@@ -67,14 +70,26 @@ module.exports = (io) => {
                 blinkCount: 0,
                 confidences: []
             };
+            console.log(`[Socket.io] Scan session marked active for socket ${socket.id}. Awaiting first frame...`);
+        });
 
-            // Initialize Presage SDK if library is loaded and API key is present
+        // Receive video frame data from frontend
+        socket.on('stream_frame_data', async (data) => {
+            const session = activeSessions.get(socket.id);
+            if (!session || !session.isScanning) return;
+
+            session.frameCount++;
+
             const apiKey = process.env.PRESAGE_API_KEY;
-            if (smartSpectraSDKLib && apiKey && apiKey !== 'mock_api_key_placeholder') {
+            const useRealSDK = smartSpectraSDKLib && apiKey && apiKey !== 'mock_api_key_placeholder';
+
+            // Defer-initialize SDK on the very first frame to align timestamps perfectly
+            if (useRealSDK && !session.sdk && !session.sdkInitializing && !session.mockInterval) {
+                session.sdkInitializing = true;
                 try {
                     const { SmartSpectraSDK, FrameTransform, breathingMetrics, cardioMetrics, decodeMetrics, PixelFormat } = smartSpectraSDKLib;
 
-                    console.log(`[Presage SDK] Initializing SDK session for socket ${socket.id}`);
+                    console.log(`[Presage SDK] First frame received. Initializing native SDK for socket ${socket.id}`);
                     const sdkInstance = new SmartSpectraSDK({
                         apiKey: apiKey,
                         requestedMetrics: [...breathingMetrics, ...cardioMetrics]
@@ -138,7 +153,6 @@ module.exports = (io) => {
                         console.error(`[Presage SDK ERROR] Code: ${code}, Msg: ${message}`);
                         if (code === 'kAuthenticationFailed') {
                             socket.emit('sdk_error', { message: "Presage API Key authentication failed. Falling back to simulation." });
-                            // Fallback to mock loop for this session
                             startMockSession(socket, session);
                         } else {
                             socket.emit('sdk_error', { message });
@@ -148,40 +162,41 @@ module.exports = (io) => {
                     sdkInstance.useCustomInput(FrameTransform.kNone);
                     sdkInstance.start();
                     session.sdk = sdkInstance;
-
-                    console.log(`[Presage SDK] SDK session successfully started for ${socket.id}`);
+                    session.sdkInitializing = false;
+                    console.log(`[Presage SDK] Native SDK session successfully started on first frame for ${socket.id}`);
                 } catch (err) {
-                    console.error("[Presage SDK] SDK failed to start. Falling back to simulation.", err);
+                    console.error("[Presage SDK] Native SDK initialization failed on first frame:", err);
+                    session.sdkInitializing = false;
                     socket.emit('sdk_error', { message: "Failed to initialize native SDK. Falling back to simulator." });
                     startMockSession(socket, session);
                 }
-            } else {
-                console.log(`[Socket.io] Running session in simulator mode for ${socket.id}`);
+            } else if (!useRealSDK && !session.mockInterval) {
+                console.log(`[Socket.io] First frame received. Starting simulator mode for ${socket.id}`);
                 startMockSession(socket, session);
             }
-        });
-
-        // Receive video frame data from frontend
-        socket.on('stream_frame_data', (data) => {
-            const session = activeSessions.get(socket.id);
-            if (!session || !session.isScanning) return;
-
-            session.frameCount++;
 
             // If we have an active SDK instance, pipe the frame to it
             if (session.sdk) {
                 try {
                     const { frame, width, height } = data || {};
-                    if (frame && Buffer.isBuffer(frame)) {
-                        // Stride is width * 3 for RGB format
+                    let frameBuffer = null;
+                    if (frame) {
+                        if (Buffer.isBuffer(frame)) {
+                            frameBuffer = frame;
+                        } else if (frame instanceof ArrayBuffer) {
+                            frameBuffer = Buffer.from(frame);
+                        } else if (ArrayBuffer.isView(frame)) {
+                            frameBuffer = Buffer.from(frame.buffer, frame.byteOffset, frame.byteLength);
+                        }
+                    }
+
+                    if (frameBuffer) {
                         const stride = width * 3;
-                        // Use monotonic timestamp in microseconds
                         const captureTsUs = process.hrtime.bigint() / 1000n;
-                        
-                        session.sdk.sendFrame(frame, width, height, stride, smartSpectraSDKLib.PixelFormat.kRGB, captureTsUs);
+                        session.sdk.sendFrame(frameBuffer, width, height, stride, smartSpectraSDKLib.PixelFormat.kRGB, captureTsUs);
                     }
                 } catch (err) {
-                    console.error("[Presage SDK] Error processing streamed frame:", err);
+                    console.error("[Presage SDK] Error sending frame to SDK:", err.message);
                 }
             }
         });

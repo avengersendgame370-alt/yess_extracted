@@ -85,6 +85,8 @@ export default function App() {
   const scanningRef = useRef(false);
   const ipImgRef = useRef(null);
   const ipLoopActiveRef = useRef(false);
+  const cursorDotRef = useRef(null);
+  const cursorRingRef = useRef(null);
 
   // Initialize particles background
   useEffect(() => {
@@ -105,6 +107,38 @@ export default function App() {
       });
     }
   }, [view]);
+
+  // Clean Sci-Fi Cursor Mouse Tracker
+  useEffect(() => {
+    const dot = cursorDotRef.current;
+    const ring = cursorRingRef.current;
+    if (!dot || !ring) return;
+
+    const onMouseMove = (e) => {
+      const x = e.clientX;
+      const y = e.clientY;
+      dot.style.transform = `translate3d(${x - 3}px, ${y - 3}px, 0)`;
+      ring.style.transform = `translate3d(${x - 16}px, ${y - 16}px, 0)`;
+    };
+
+    const onMouseOver = (e) => {
+      const target = e.target;
+      const isClickable = target.closest('button, a, select, input, [role="button"], .nav-item, .action-btn, .tab-btn, option');
+      if (isClickable) {
+        ring.classList.add('hover');
+      } else {
+        ring.classList.remove('hover');
+      }
+    };
+
+    window.addEventListener('mousemove', onMouseMove);
+    window.addEventListener('mouseover', onMouseOver);
+
+    return () => {
+      window.removeEventListener('mousemove', onMouseMove);
+      window.removeEventListener('mouseover', onMouseOver);
+    };
+  }, []);
 
   // Log in user session
   const saveAuthSession = (token, user) => {
@@ -320,8 +354,16 @@ export default function App() {
   const initializeFaceMeshScanner = async () => {
     cleanupCamera();
     
+    // Safety check: verify MediaPipe CDNs are fully loaded
+    if (typeof window.FaceMesh === 'undefined' || typeof window.Camera === 'undefined') {
+      setBiometricStatus('LOADING CORE AI LIBRARIES...');
+      addSystemLog("Awaiting MediaPipe WebAssembly CDNs...", "info");
+      setTimeout(initializeFaceMeshScanner, 1000);
+      return;
+    }
+    
     // Create new FaceMesh context
-    const faceMesh = new FaceMesh({
+    const faceMesh = new window.FaceMesh({
       locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/face_mesh/${file}`
     });
     
@@ -479,16 +521,93 @@ export default function App() {
     }
   };
 
+  // Frame pipe loop that runs at a solid 30 fps, sending raw RGB frames to Socket.io
+  const startFramePiping = (videoEl, imgEl, mode) => {
+    const offscreenCanvas = document.createElement('canvas');
+    offscreenCanvas.width = 320;
+    offscreenCanvas.height = 240;
+    const offCtx = offscreenCanvas.getContext('2d');
+
+    const fps = 30;
+    const interval = 1000 / fps;
+    let lastTime = performance.now();
+
+    const pipeFrame = () => {
+      // Loop halts if scanning is stopped
+      if (!scanningRef.current) return;
+
+      const now = performance.now();
+      const elapsed = now - lastTime;
+
+      if (elapsed >= interval) {
+        lastTime = now - (elapsed % interval);
+
+        try {
+          offCtx.save();
+          offCtx.translate(320, 0);
+          offCtx.scale(-1, 1);
+          
+          let hasFrame = false;
+          if (mode === 'IP_CAM') {
+            if (imgEl && imgEl.complete && imgEl.naturalWidth > 0) {
+              offCtx.drawImage(imgEl, 0, 0, 320, 240);
+              hasFrame = true;
+            }
+          } else {
+            if (videoEl && videoEl.readyState >= 2) {
+              offCtx.drawImage(videoEl, 0, 0, 320, 240);
+              hasFrame = true;
+            }
+          }
+          offCtx.restore();
+
+          if (hasFrame) {
+            const imgData = offCtx.getImageData(0, 0, 320, 240);
+            const data = imgData.data;
+            const rgbBuffer = new Uint8Array(320 * 240 * 3);
+            let rgbIdx = 0;
+            for (let i = 0; i < data.length; i += 4) {
+              rgbBuffer[rgbIdx++] = data[i];
+              rgbBuffer[rgbIdx++] = data[i + 1];
+              rgbBuffer[rgbIdx++] = data[i + 2];
+            }
+
+            if (socketRef.current && socketRef.current.connected) {
+              socketRef.current.emit('stream_frame_data', {
+                frame: rgbBuffer.buffer,
+                width: 320,
+                height: 240
+              });
+            }
+          }
+        } catch (err) {
+          console.error("Frame pipe loop error:", err);
+        }
+      }
+
+      requestAnimationFrame(pipeFrame);
+    };
+
+    requestAnimationFrame(pipeFrame);
+  };
+
   // Start vital scan telemetry session
   const startScanning = async () => {
     if (isScanning) return;
+    
+    // Safety check: verify MediaPipe is loaded
+    if (typeof window.FaceMesh === 'undefined' || typeof window.Camera === 'undefined') {
+      addSystemLog("AI Engine library not fully loaded yet. Please wait.", "warning");
+      return;
+    }
+
     setIsScanning(true);
     addSystemLog("Initializing VitalSense scanning session", "info");
 
     socketRef.current.emit('start_session', { token });
 
     // Set up camera and FaceMesh pipelines for dashboard overlay
-    const faceMesh = new FaceMesh({
+    const faceMesh = new window.FaceMesh({
       locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/face_mesh/${file}`
     });
     
@@ -498,12 +617,6 @@ export default function App() {
       minDetectionConfidence: 0.5,
       minTrackingConfidence: 0.5
     });
-
-    // Temp canvasses for downsampling frame grabbing
-    const offscreenCanvas = document.createElement('canvas');
-    offscreenCanvas.width = 320;
-    offscreenCanvas.height = 240;
-    const offCtx = offscreenCanvas.getContext('2d');
 
     faceMesh.onResults((results) => {
       const canvas = outputCanvasRef.current;
@@ -517,34 +630,6 @@ export default function App() {
       ctx.scale(-1, 1);
       ctx.drawImage(results.image, 0, 0, canvas.width, canvas.height);
       ctx.restore();
-
-      // Downsample and pipe raw RGB bytes to backend Socket
-      offCtx.save();
-      offCtx.translate(320, 0);
-      offCtx.scale(-1, 1);
-      offCtx.drawImage(results.image, 0, 0, 320, 240);
-      offCtx.restore();
-
-      try {
-        const imgData = offCtx.getImageData(0, 0, 320, 240);
-        const data = imgData.data; // RGBA
-        const rgbBuffer = new Uint8Array(320 * 240 * 3);
-        let rgbIdx = 0;
-        for (let i = 0; i < data.length; i += 4) {
-          rgbBuffer[rgbIdx++] = data[i];     // R
-          rgbBuffer[rgbIdx++] = data[i + 1]; // G
-          rgbBuffer[rgbIdx++] = data[i + 2]; // B
-        }
-        
-        // Send frame RGB Buffer to Socket
-        socketRef.current.emit('stream_frame_data', {
-          frame: rgbBuffer.buffer,
-          width: 320,
-          height: 240
-        });
-      } catch (err) {
-        console.error("Frame downsample send error:", err);
-      }
 
       // Draw client cosmetic mesh grid
       if (results.multiFaceLandmarks && results.multiFaceLandmarks.length > 0) {
@@ -595,6 +680,9 @@ export default function App() {
           }, 33);
         };
         ipScanLoop();
+
+        // Start high-performance 30 FPS stream
+        startFramePiping(null, ipImgRef.current, 'IP_CAM');
         addSystemLog("IP camera loop active", "success");
       } catch (err) {
         console.error("Failed to start scan camera:", err);
@@ -625,6 +713,10 @@ export default function App() {
         });
         camera.start();
         cameraRef.current = camera;
+        scanningRef.current = true;
+
+        // Start high-performance 30 FPS stream
+        startFramePiping(videoRef.current, null, 'WEBCAM');
         addSystemLog("Scan active - stream linked", "success");
       } catch (err) {
         console.error("Failed to start scan camera:", err);
@@ -1365,6 +1457,8 @@ export default function App() {
           </div>
         </div>
       )}
+      <div ref={cursorDotRef} className="cursor-dot"></div>
+      <div ref={cursorRingRef} className="cursor-ring"></div>
     </div>
   );
 }
