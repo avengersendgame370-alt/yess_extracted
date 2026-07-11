@@ -20,9 +20,15 @@ router.get('/droidcam-proxy', (req, res) => {
             const parsedUrl = new URL(urlStr);
             
             client.get(parsedUrl.href, { rejectUnauthorized: false }, (proxyRes) => {
+                if (res.headersSent) return;
                 res.writeHead(proxyRes.statusCode, proxyRes.headers);
                 proxyRes.pipe(res);
             }).on('error', (err) => {
+                if (res.headersSent) {
+                    console.error("[DroidCam Proxy] Socket error after headers sent:", err.message);
+                    return;
+                }
+                
                 // If SSL/handshake error occurs on HTTPS, try falling back to HTTP
                 if (isHttps && (err.code === 'EPROTO' || err.message.includes('SSL') || err.message.includes('tls') || err.code === 'ECONNRESET')) {
                     const fallbackUrl = urlStr.replace(/^https:/, 'http:');
@@ -34,7 +40,9 @@ router.get('/droidcam-proxy', (req, res) => {
                 }
             });
         } catch (err) {
-            res.status(500).send("Invalid DroidCam URL format");
+            if (!res.headersSent) {
+                res.status(500).send("Invalid DroidCam URL format");
+            }
         }
     };
 
