@@ -19,8 +19,7 @@ import {
   Square,
   AlertTriangle,
   Eye,
-  Brain,
-  RefreshCw
+  Brain
 } from 'lucide-react';
 
 // API and Socket server URL configurations
@@ -1103,23 +1102,9 @@ export default function App() {
                               <Play size={14} /> START HEALTH LOCK
                             </button>
                           ) : (
-                            <>
-                              <button onClick={stopScanning} className="action-btn" style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '0.5rem', borderColor: '#ff5252', color: '#ff5252', boxShadow: '0 0 10px rgba(255,82,82,0.15)' }}>
-                                <Square size={14} /> HALT TELEMETRY
-                              </button>
-                              <button 
-                                onClick={() => {
-                                  if (socketRef.current) {
-                                    socketRef.current.emit('reset_session');
-                                    addSystemLog("Biometric session reset. Recalibrating average readings...", "info");
-                                  }
-                                }} 
-                                className="action-btn" 
-                                style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '0.5rem', borderColor: '#ffaa00', color: '#ffaa00', boxShadow: '0 0 10px rgba(255,170,0,0.15)' }}
-                              >
-                                <RefreshCw size={14} /> RESTART SESSION
-                              </button>
-                            </>
+                            <button onClick={stopScanning} className="action-btn" style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '0.5rem', borderColor: '#ff5252', color: '#ff5252', boxShadow: '0 0 10px rgba(255,82,82,0.15)' }}>
+                              <Square size={14} /> HALT TELEMETRY
+                            </button>
                           )}
                         </div>
 
@@ -1215,27 +1200,7 @@ export default function App() {
                         </div>
                       </div>
 
-                      {/* Blink Rate Display */}
-                      <div className="sci-panel panel-blink-rate" style={{ flex: 'none', margin: 0 }}>
-                        <div className="panel-header" style={{ padding: '0.6rem 0.8rem' }}>
-                          <div className="header-title" style={{ fontSize: '0.75rem' }}>
-                            <Eye size={14} style={{ color: '#ffaa00' }} />
-                            BLINK RATE
-                          </div>
-                          <div className="dots">...</div>
-                        </div>
-                        <div className="panel-body" style={{ padding: '0.4rem 0.8rem 0.8rem 0.8rem' }}>
-                          <div className="readout" style={{ marginBottom: '0.2rem' }}>
-                            <span className="value" style={{ color: '#ffaa00', fontFamily: 'var(--font-numeric)', fontSize: '2rem' }}>
-                              {vitals.heartRate > 0 && vitals.blinkRate !== undefined ? vitals.blinkRate : '--'}
-                            </span>
-                            <span className="unit" style={{ fontSize: '0.8rem', marginLeft: '0.2rem' }}>BPM</span>
-                          </div>
-                          <div style={{ fontSize: '0.6rem', color: 'var(--text-secondary)', fontFamily: 'var(--font-mono)' }}>
-                            EYE OCCLUSION TALLY
-                          </div>
-                        </div>
-                      </div>
+
 
                       {/* SpO2 Display */}
                       <div className="sci-panel panel-spo2" style={{ flex: 'none', margin: 0 }}>
@@ -1259,7 +1224,7 @@ export default function App() {
                       </div>
 
                       {/* Signal Confidence Display */}
-                      <div className="sci-panel panel-confidence" style={{ flex: 'none', margin: 0 }}>
+                      <div className="sci-panel panel-confidence" style={{ flex: 'none', margin: 0, gridColumn: 'span 2' }}>
                         <div className="panel-header" style={{ padding: '0.6rem 0.8rem' }}>
                           <div className="header-title" style={{ fontSize: '0.75rem' }}>
                             <Shield size={14} style={{ color: '#3ef7a5' }} />
@@ -1339,33 +1304,16 @@ export default function App() {
                     <div className="sci-panel" style={{ flex: 'none' }}>
                       <div className="panel-header">COGNITIVE / BEHAVIOR STATE</div>
                       <div className="face-grid" style={{ marginBottom: '1rem' }}>
-                        <div className="face-box">
-                          <div className="label">BLINK TALLY</div>
-                          <div className="val text-blue" style={{ fontFamily: 'var(--font-numeric)' }}>{isScanning && vitals.faceFound ? vitals.blinkCount : '--'}</div>
-                        </div>
-                        <div className="face-box">
+                        <div className="face-box" style={{ gridColumn: 'span 2' }}>
                           <div className="label">SPEECH DETECTED</div>
-                          <div className={vitals.talking === 'YES' ? "val text-green" : "val"} style={{ fontFamily: 'var(--font-mono)', fontSize: '1.2rem', color: vitals.talking === 'YES' ? '#3ef7a5' : '#888' }}>
-                            {isScanning && vitals.faceFound && (vitals.talking === 'YES' || vitals.talking === 'NO') ? vitals.talking : '--'}
-                          </div>
+                          <div className="val text-green" style={{ fontFamily: 'var(--font-mono)', fontSize: '1.2rem' }}>{vitals.heartRate > 0 ? vitals.talking : '--'}</div>
                         </div>
                       </div>
                       <div style={{ padding: '0 1rem 1rem 1rem' }}>
                         <div className="label" style={{ fontFamily: 'var(--font-mono)', fontSize: '0.7rem', color: 'var(--text-secondary)', marginBottom: '0.3rem' }}>EXPRESSION PROFILE</div>
-                        {!isScanning || !vitals.faceFound || vitals.expression === 'NO FACE DETECTED' || vitals.expression === 'CALIBRATING...' || vitals.expression === 'ENGINE DOES NOT SUPPORT EXPRESSION ANALYSIS' ? (
-                          <div style={{ fontFamily: 'var(--font-hud)', fontSize: '1.2rem', fontWeight: 500, letterSpacing: '1px', color: '#888' }}>
-                            {!isScanning ? 'NO FACE DETECTED' : (vitals.expression || 'CALIBRATING...')}
-                          </div>
-                        ) : (
-                          <div className="text-green" style={{ fontFamily: 'var(--font-hud)', fontSize: '1.3rem', fontWeight: 500, letterSpacing: '1px', display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
-                            <span>{vitals.expression}</span>
-                            {vitals.expressionConfidence !== undefined && vitals.expressionConfidence > 0 && (
-                              <span style={{ fontSize: '0.75rem', color: 'rgba(0, 217, 255, 0.7)', fontWeight: 400, fontFamily: 'var(--font-mono)' }}>
-                                ({Math.round(vitals.expressionConfidence * 100)}%)
-                              </span>
-                            )}
-                          </div>
-                        )}
+                        <div className="text-green" style={{ fontFamily: 'var(--font-hud)', fontSize: '1.3rem', fontWeight: 500, letterSpacing: '1px' }}>
+                          {vitals.heartRate > 0 ? vitals.expression : 'NO FACE DETECTED'}
+                        </div>
                       </div>
                     </div>
 

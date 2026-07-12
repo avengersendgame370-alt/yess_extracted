@@ -152,6 +152,10 @@ class RPPGEngine:
             # Fallback to POS FFT
             hr_bpm = self._estimate_fft_hr(filtered_bvp, freqs)
             
+        # Physiological validation: fallback to POS-FFT if CNN outputs unreasonable values
+        if hr_bpm < 45.0 or hr_bpm > 180.0:
+            hr_bpm = self._estimate_fft_hr(filtered_bvp, freqs)
+            
         # 3. Peak-Picking for HRV calculations
         # Find local maxima in BVP waveform
         beat_peaks_ms = []
