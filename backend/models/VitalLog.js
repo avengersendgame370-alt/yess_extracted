@@ -49,10 +49,6 @@ const VitalLogSchema = new mongoose.Schema({
     confidence: {
         type: Number,
         required: true
-    },
-    finalExpression: {
-        type: String,
-        default: 'CALM / BASELINE'
     }
 });
 
