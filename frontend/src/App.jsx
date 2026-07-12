@@ -19,7 +19,8 @@ import {
   Square,
   AlertTriangle,
   Eye,
-  Brain
+  Brain,
+  RefreshCw
 } from 'lucide-react';
 
 // API and Socket server URL configurations
@@ -1102,9 +1103,23 @@ export default function App() {
                               <Play size={14} /> START HEALTH LOCK
                             </button>
                           ) : (
-                            <button onClick={stopScanning} className="action-btn" style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '0.5rem', borderColor: '#ff5252', color: '#ff5252', boxShadow: '0 0 10px rgba(255,82,82,0.15)' }}>
-                              <Square size={14} /> HALT TELEMETRY
-                            </button>
+                            <>
+                              <button onClick={stopScanning} className="action-btn" style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '0.5rem', borderColor: '#ff5252', color: '#ff5252', boxShadow: '0 0 10px rgba(255,82,82,0.15)' }}>
+                                <Square size={14} /> HALT TELEMETRY
+                              </button>
+                              <button 
+                                onClick={() => {
+                                  if (socketRef.current) {
+                                    socketRef.current.emit('reset_session');
+                                    addSystemLog("Biometric session reset. Recalibrating average readings...", "info");
+                                  }
+                                }} 
+                                className="action-btn" 
+                                style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '0.5rem', borderColor: '#ffaa00', color: '#ffaa00', boxShadow: '0 0 10px rgba(255,170,0,0.15)' }}
+                              >
+                                <RefreshCw size={14} /> RESTART SESSION
+                              </button>
+                            </>
                           )}
                         </div>
 

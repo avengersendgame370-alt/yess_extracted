@@ -308,6 +308,36 @@ module.exports = (io) => {
             }
         });
 
+        // Reset active session metrics and buffers on demand (e.g. when changing subjects)
+        socket.on('reset_session', () => {
+            const session = activeSessions.get(socket.id);
+            if (!session) return;
+            console.log(`[Socket.io] Resetting metrics and session buffers for socket ${socket.id}`);
+            
+            // Send reset message to Python microservice
+            if (session.mlWs && session.mlWs.readyState === WebSocket.OPEN) {
+                try {
+                    session.mlWs.send(JSON.stringify({ type: "reset" }));
+                } catch (e) {
+                    console.error("[Socket.io] Error sending reset to ML service:", e.message);
+                }
+            }
+
+            // Clear Node metrics average buffer
+            session.metricsBuffer = {
+                heartRates: [],
+                respirationRates: [],
+                spo2s: [],
+                stresses: [],
+                rmssds: [],
+                sdnns: [],
+                blinkCount: 0,
+                blinkRates: [],
+                stressLabels: [],
+                confidences: []
+            };
+        });
+
         // Stop session, compute averages, and write log to MongoDB
         socket.on('end_session', async () => {
             const session = activeSessions.get(socket.id);
