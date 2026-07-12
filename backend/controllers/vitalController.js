@@ -2,11 +2,8 @@ const VitalLog = require('../models/VitalLog');
 
 // Save a vital sign log entry
 exports.saveSessionLog = async (req, res) => {
-    if (!global.dbConnected) {
-        return res.status(503).json({ error: "Database offline. Session log saved locally only." });
-    }
     try {
-        const { heartRate, respirationRate, spo2, stress, rmssd, sdnn, blinkCount, confidence } = req.body;
+        const { heartRate, respirationRate, spo2, stress, rmssd, sdnn, blinkCount, blinkRate, stressLabel, confidence } = req.body;
         
         if (
             heartRate === undefined || 
@@ -21,6 +18,26 @@ exports.saveSessionLog = async (req, res) => {
             return res.status(400).json({ error: "Missing required vital metrics parameters" });
         }
 
+        if (!global.dbConnected) {
+            const mockLog = {
+                _id: 'mocklog' + Math.random().toString(16).substring(2, 22),
+                userId: req.userId,
+                timestamp: new Date(),
+                heartRate,
+                respirationRate,
+                spo2,
+                stress,
+                rmssd,
+                sdnn,
+                blinkCount,
+                blinkRate: blinkRate || 0,
+                stressLabel: stressLabel || 'CALM / BASELINE',
+                confidence
+            };
+            global.inMemoryLogs.unshift(mockLog);
+            return res.status(201).json({ message: "Vitals logged successfully (Local Memory Mode)", log: mockLog });
+        }
+
         const log = new VitalLog({
             userId: req.userId,
             heartRate,
@@ -30,6 +47,8 @@ exports.saveSessionLog = async (req, res) => {
             rmssd,
             sdnn,
             blinkCount,
+            blinkRate: blinkRate || 0,
+            stressLabel: stressLabel || 'CALM / BASELINE',
             confidence
         });
 
@@ -43,10 +62,11 @@ exports.saveSessionLog = async (req, res) => {
 
 // Get last 50 entries for historic trends
 exports.getHistoricalTrends = async (req, res) => {
-    if (!global.dbConnected) {
-        return res.status(503).json({ error: "Database offline. Cannot query trends." });
-    }
     try {
+        if (!global.dbConnected) {
+            const trends = global.inMemoryLogs.filter(log => log.userId === req.userId);
+            return res.json(trends.slice(0, 50));
+        }
         const trends = await VitalLog.find({ userId: req.userId })
             .sort({ timestamp: -1 })
             .limit(50);
@@ -59,10 +79,14 @@ exports.getHistoricalTrends = async (req, res) => {
 
 // Get the latest vital signs log
 exports.getLatestVitals = async (req, res) => {
-    if (!global.dbConnected) {
-        return res.status(503).json({ error: "Database offline. Cannot query latest vitals." });
-    }
     try {
+        if (!global.dbConnected) {
+            const trends = global.inMemoryLogs.filter(log => log.userId === req.userId);
+            if (trends.length === 0) {
+                return res.status(404).json({ error: "No telemetry records found for this user" });
+            }
+            return res.json(trends[0]);
+        }
         const latest = await VitalLog.findOne({ userId: req.userId })
             .sort({ timestamp: -1 });
         if (!latest) {

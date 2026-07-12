@@ -10,6 +10,15 @@ services:
       - mongo_data:/data/db
     restart: unless-stopped
 
+  ml-service:
+    build: ./ml-service
+    container_name: vitalsense_ml_service
+    ports:
+      - "8001:8001"
+    environment:
+      - PORT=8001
+    restart: unless-stopped
+
   backend:
     build: ./backend
     container_name: vitalsense_backend
@@ -25,6 +34,7 @@ services:
       - NODE_ENV=production
     depends_on:
       - mongodb
+      - ml-service
     restart: unless-stopped
 
   frontend:

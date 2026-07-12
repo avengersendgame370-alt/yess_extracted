@@ -3,18 +3,23 @@ const VitalLog = require('../models/VitalLog');
 const User = require('../models/User');
 
 exports.generatePDFReport = async (req, res) => {
-    if (!global.dbConnected) {
-        return res.status(503).json({ error: "Database offline. Cannot compile PDF reports." });
-    }
     try {
-        const user = await User.findById(req.userId);
-        if (!user) {
-            return res.status(404).json({ error: "User not found" });
-        }
+        let user;
+        let logs;
 
-        const logs = await VitalLog.find({ userId: req.userId })
-            .sort({ timestamp: -1 })
-            .limit(20);
+        if (!global.dbConnected) {
+            user = global.inMemoryUsers.find(u => u._id === req.userId);
+            if (!user) user = { name: "Demo Subject", email: "demo@vitalsense.ai" };
+            logs = global.inMemoryLogs.filter(log => log.userId === req.userId).slice(0, 20);
+        } else {
+            user = await User.findById(req.userId);
+            if (!user) {
+                return res.status(404).json({ error: "User not found" });
+            }
+            logs = await VitalLog.find({ userId: req.userId })
+                .sort({ timestamp: -1 })
+                .limit(20);
+        }
 
         if (logs.length === 0) {
             return res.status(404).json({ error: "No biometric sessions logged. Run a telemetry scan first." });
@@ -22,9 +27,16 @@ exports.generatePDFReport = async (req, res) => {
 
         let latest = logs[0];
         if (req.query.sessionId) {
-            const matchedLog = await VitalLog.findOne({ _id: req.query.sessionId, userId: req.userId });
-            if (matchedLog) {
-                latest = matchedLog;
+            if (!global.dbConnected) {
+                const matchedLog = global.inMemoryLogs.find(l => l._id === req.query.sessionId && l.userId === req.userId);
+                if (matchedLog) {
+                    latest = matchedLog;
+                }
+            } else {
+                const matchedLog = await VitalLog.findOne({ _id: req.query.sessionId, userId: req.userId });
+                if (matchedLog) {
+                    latest = matchedLog;
+                }
             }
         }
 
@@ -84,7 +96,7 @@ exports.generatePDFReport = async (req, res) => {
            .text(`Reference: VS-${user._id.toString().substring(18).toUpperCase()}`, 300, 150);
 
         // Vitals Summary Panel Box
-        doc.rect(50, 180, 510, 80)
+        doc.rect(50, 180, 510, 115)
            .fill('#f8fafc');
 
         doc.fillColor(darkColor)
@@ -102,48 +114,64 @@ exports.generatePDFReport = async (req, res) => {
 
         doc.fillColor(primaryColor)
            .font('Helvetica-Bold')
-           .fontSize(16)
+           .fontSize(14)
            .text(`${latest.heartRate} BPM`, 65, 235)
            .text(`${latest.respirationRate} rpm`, 200, 235)
            .text(`${latest.spo2}%`, 330, 235)
            .text(`${latest.stress.toFixed(0)}`, 470, 235);
 
+        // Second Row inside panel box for ML service parameters
+        doc.font('Helvetica')
+           .fontSize(9)
+           .fillColor(grayColor)
+           .text(`Blink Rate:`, 65, 255)
+           .text(`Stress State:`, 200, 255)
+           .text(`Signal Confidence:`, 380, 255);
+
+        doc.fillColor(primaryColor)
+           .font('Helvetica-Bold')
+           .fontSize(12)
+           .text(`${latest.blinkRate || 0} blinks/min`, 65, 270)
+           .text(`${latest.stressLabel || 'CALM / BASELINE'}`, 200, 270)
+           .text(`${latest.confidence || 0}%`, 380, 270);
+
         // Vitals Statistics Trends
         doc.fillColor(darkColor)
            .font('Helvetica-Bold')
            .fontSize(12)
-           .text('20-POINT METRIC HISTORICAL AVERAGES', 50, 290);
+           .text('20-POINT METRIC HISTORICAL AVERAGES', 50, 315);
 
         doc.font('Helvetica')
            .fontSize(10)
-           .text(`Average Heart Rate: ${avgHR} BPM`, 50, 315)
-           .text(`Average Respiration Rate: ${avgRR} rpm`, 50, 335)
-           .text(`Average SpO2 Integrity: ${avgSpO2}%`, 300, 315)
-           .text(`Average Cognitive Stress Index: ${avgStress}`, 300, 335);
+           .text(`Average Heart Rate: ${avgHR} BPM`, 50, 335)
+           .text(`Average Respiration Rate: ${avgRR} rpm`, 50, 355)
+           .text(`Average SpO2 Integrity: ${avgSpO2}%`, 300, 335)
+           .text(`Average Cognitive Stress Index: ${avgStress}`, 300, 355);
 
         // Telemetry Grid Header
         doc.strokeColor('#e2e8f0')
            .lineWidth(1)
-           .moveTo(50, 375)
-           .lineTo(560, 375)
+           .moveTo(50, 390)
+           .lineTo(560, 390)
            .stroke();
 
         doc.fillColor(darkColor)
            .font('Helvetica-Bold')
            .fontSize(11)
-           .text('HISTORICAL DATA LOGS', 50, 395);
+           .text('HISTORICAL DATA LOGS', 50, 410);
 
         // Draw logs table headers
-        let y = 425;
+        let y = 435;
         doc.fillColor(grayColor)
            .font('Helvetica-Bold')
            .fontSize(9)
            .text('TIMESTAMP', 55, y)
            .text('HR (BPM)', 180, y)
-           .text('RR (rpm)', 250, y)
-           .text('SpO2 (%)', 320, y)
-           .text('STRESS', 390, y)
-           .text('CONFIDENCE', 470, y);
+           .text('RR (rpm)', 240, y)
+           .text('SpO2 (%)', 300, y)
+           .text('STRESS', 360, y)
+           .text('BLINK RATE', 420, y)
+           .text('CONFIDENCE', 490, y);
 
         doc.strokeColor('#cbd5e1')
            .lineWidth(1)
@@ -157,15 +185,16 @@ exports.generatePDFReport = async (req, res) => {
            .fillColor(darkColor);
 
         // Limit to last 10 rows for single page print format consistency
-        const rowLogs = logs.slice(0, 12);
+        const rowLogs = logs.slice(0, 10);
         rowLogs.forEach((log) => {
             const dateStr = new Date(log.timestamp).toLocaleString();
             doc.text(dateStr, 55, y)
                .text(`${log.heartRate}`, 180, y)
-               .text(`${log.respirationRate}`, 250, y)
-               .text(`${log.spo2}%`, 320, y)
-               .text(`${log.stress.toFixed(0)}`, 390, y)
-               .text(`${log.confidence}%`, 470, y);
+               .text(`${log.respirationRate}`, 240, y)
+               .text(`${log.spo2}%`, 300, y)
+               .text(`${log.stress.toFixed(0)}`, 360, y)
+               .text(`${log.blinkRate || 0}`, 420, y)
+               .text(`${log.confidence}%`, 490, y);
 
             doc.strokeColor('#f1f5f9')
                .lineWidth(0.5)

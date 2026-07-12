@@ -9,28 +9,58 @@ The dashboard includes a real-time face mesh wireframe overlay, heart rate (BPM)
 ## Technical Architecture
 
 ```text
-┌────────────────────┐        WebSocket (frames)        ┌──────────────────────────┐
-│  Browser (React)    │ ───────────────────────────────▶ │  Node.js + Express        │
-│  - getUserMedia      │                                  │  - Socket.IO server        │
-│    (DroidCam or      │ ◀─────────────────────────────── │  - SmartSpectraSDK          │
-│     real webcam)      │        WebSocket (vitals)        │    (headless, sendFrame)    │
-│  - FaceMesh overlay   │                                  │  - JWT auth (bcrypt)        │
-│  - Cyber-HUD dashboard│  ── REST (auth, history, PDF) ─▶ │  - REST API (Express)       │
-│  - Session history UI │ ◀──────────────────────────────  │  - PDFKit report export      │
-└────────────────────┘                                  └───────────┬──────────────┘
-                                                                        │ Mongoose
-                                                                        ▼
-                                                             ┌────────────────────┐
-                                                             │   MongoDB Atlas     │
-                                                             │  users, vitallogs   │
-                                                             └────────────────────┘
+┌────────────────────┐      WebSocket (frames)      ┌──────────────────────────┐
+│  Browser (React)    │ ───────────────────────────▶ │  Node.js + Express        │
+│  - getUserMedia      │                              │  - Socket.IO server      │
+│  - FaceMesh overlay   │ ◀─────────────────────────── │  - Config: dsp / ml      │
+│  - Cyber-HUD dashboard│      WebSocket (vitals)      │  - Proxy to ml-service   │
+└────────────────────┘                              └──────────┬───┬───────────┘
+                                                       ▲       │   │ Mongoose
+                                    Proxy WS (frames)  │       │   ▼
+                                    and Vitals JSON    │       │ ┌────────────────────┐
+                                                       │       │ │   MongoDB Atlas    │
+                                                       ▼       │ │  users, vitallogs  │
+                                            ┌──────────────────┴─┐ └────────────────────┘
+                                            │ Python ml-service  │
+                                            │ - FastAPI / Uvicorn│
+                                            │ - PyTorch 1D CNN   │
+                                            │ - Tabular ML models│
+                                            └────────────────────┘
 ```
+
+---
+
+## ML Vitals Engine & Model Cards
+
+The machine learning telemetry is handled by a dedicated Python FastAPI microservice (`ml-service/`). The service integrates the following custom models:
+
+### 1. 1D Temporal CNN (Remote PPG Pulse Rate)
+* **Architecture:** 1D Conv Layers + BatchNorm + ELU + Adaptive Average Pooling + Linear Regressor.
+* **Intended Use:** Contactless heart rate estimation (BPM) and peak-to-peak beat interval extraction from facial cheek/forehead ROI color trajectories.
+* **Data Source:** Trained on synthetic cardiac pulse simulations and preprocessed UBFC-rPPG video streams.
+* **Limitations:** Sensitive to facial movements (talking, chewing), head rotations, and ambient lighting changes. Not clinically validated.
+
+### 2. SpO2 Regressor
+* **Architecture:** Tabular Linear Regression / Ratio-of-Ratios calibration.
+* **Intended Use:** Estimate blood oxygen levels (SpO2 %) using the relative AC/DC ratio of RED vs GREEN/BLUE channels.
+* **Limitations:** Ambient color temperature shifts and camera sensor response curves degrade accuracy. Meant for wellness/reference tracking only.
+
+### 3. Blink EAR Classifier
+* **Architecture:** Logistic Regression / EAR State-Machine sequence classifier.
+* **Intended Use:** Identifies eye blink closures per frame from the Eye Aspect Ratio (EAR) sequence.
+* **Limitations:** Squinting, eyewear reflection, and rapid head tilting can trigger false positives.
+
+### 4. Cognitive Stress Predictor
+* **Architecture:** Random Forest Classifier.
+* **Intended Use:** Classifies cognitive stress into 4 severity levels (Low, Moderate, Elevated, High) based on HRV time-domain metrics (SDNN, RMSSD) and blink rates.
+* **Limitations:** Physiological stress indicators are subjective and influenced by caffeine, sleep deprivation, and external noise.
 
 ---
 
 ## Tech Stack
 - **Frontend:** React (Vite), Pure CSS custom cyber-HUD variables, Socket.IO-client, MediaPipe FaceMesh (for UI canvas wireframe decoration), Canvas-based real-time line chart.
-- **Backend:** Node.js, Express, Socket.IO, `@smartspectra/node-sdk` (Presage SmartSpectra Node SDK running headless on monotonic processes), MongoDB + Mongoose, JWT + bcrypt, PDFKit.
+- **Backend:** Node.js, Express, Socket.IO, `@smartspectra/node-sdk` (Presage SmartSpectra Node SDK fallback), `ws` WebSocket client proxy, MongoDB + Mongoose, JWT + bcrypt, PDFKit.
+- **ML Service:** Python, FastAPI, Uvicorn, PyTorch, MediaPipe FaceMesh (Python-based backup extractor), scikit-learn, NumPy, OpenCV, pytest.
 - **Deployment:** Docker & Docker-Compose.
 
 ---
@@ -49,8 +79,32 @@ The dashboard includes a real-time face mesh wireframe overlay, heart rate (BPM)
    JWT_SECRET=f4d1e2b5e0c5a2e5d9c8b7a6f5e4d3c2b1a09876543210abcdef0123456789ab
    PRESAGE_API_KEY=your_presage_api_key_here
    CLIENT_ORIGIN=http://localhost:8000
+   
+   # Enable ML Vitals Engine (set to 'ml' or 'dsp')
+   VITALS_ENGINE=ml
+   ML_SERVICE_URL=ws://127.0.0.1:8001
    ```
-   *Note: If no valid `PRESAGE_API_KEY` is provided, the backend automatically runs in a high-fidelity simulation loop (Mock Mode) so all charts and gauges still update dynamically.*
+   *Note: If no valid `PRESAGE_API_KEY` is provided in `dsp` mode, the backend automatically runs in a high-fidelity simulation loop (Mock Mode). If `ml` mode is active, Node.js proxies raw telemetry to the Python `ml-service` WebSocket.*
+
+### Run ML Microservice & Models
+To run the ML engine locally, make sure you have Python 3.10+ installed:
+
+1. Install dependencies:
+   ```bash
+   cd ml-service
+   pip install -r requirements.txt
+   ```
+2. Train/Generate Models (compiles PyTorch CNN, SpO2 regression coefficients, EAR blink state machine, and stress classifier):
+   ```bash
+   python training/train_rppg_cnn.py
+   python training/train_spo2.py
+   python training/train_blink.py
+   python training/train_stress.py
+   ```
+3. Start the FastAPI Uvicorn server:
+   ```bash
+   python -m uvicorn app.main:app --host 127.0.0.1 --port 8001
+   ```
 
 ### Run Backend
 ```bash
@@ -67,6 +121,7 @@ npm install
 npm run dev
 ```
 Open `http://localhost:5173` in your browser.
+
 
 ---
 

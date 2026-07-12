@@ -38,6 +38,14 @@ const VitalLogSchema = new mongoose.Schema({
         type: Number,
         required: true
     },
+    blinkRate: {
+        type: Number,
+        default: 0
+    },
+    stressLabel: {
+        type: String,
+        default: 'CALM / BASELINE'
+    },
     confidence: {
         type: Number,
         required: true

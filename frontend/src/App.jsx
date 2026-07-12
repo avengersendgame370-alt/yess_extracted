@@ -17,7 +17,9 @@ import {
   Video, 
   Play, 
   Square,
-  AlertTriangle
+  AlertTriangle,
+  Eye,
+  Brain
 } from 'lucide-react';
 
 // API and Socket server URL configurations
@@ -25,9 +27,25 @@ const SERVER_URL = window.location.hostname === 'localhost' || window.location.h
   ? 'http://127.0.0.1:5000'
   : window.location.origin;
 
+const getStressColor = (label) => {
+  const normLabel = (label || '').toUpperCase();
+  if (!normLabel || normLabel === '--') {
+    return { fg: "#888888", bg: "rgba(136,136,136,0.15)" };
+  }
+  if (normLabel.includes("HIGH") || normLabel.includes("FATIGUE")) {
+    return { fg: "#ff5252", bg: "rgba(255,82,82,0.15)" };
+  } else if (normLabel.includes("ELEVATED") || normLabel.includes("STRESS")) {
+    return { fg: "#ffaa00", bg: "rgba(255,170,0,0.15)" };
+  } else if (normLabel.includes("MODERATE")) {
+    return { fg: "#00d9ff", bg: "rgba(0,217,255,0.15)" };
+  } else {
+    return { fg: "#3ef7a5", bg: "rgba(62,247,165,0.15)" };
+  }
+};
+
 export default function App() {
   const [view, setView] = useState('LOGIN'); // LOGIN, DASHBOARD, HISTORY, ABOUT
-  const [authMode, setAuthMode] = useState('FACE_LOGIN'); // FACE_LOGIN, EMAIL_LOGIN, REGISTER
+  const [authMode, setAuthMode] = useState('EMAIL_LOGIN'); // EMAIL_LOGIN, REGISTER
   
   // Auth state
   const [token, setToken] = useState(localStorage.getItem('token') || '');
@@ -52,7 +70,7 @@ export default function App() {
   const [selectedDeviceId, setSelectedDeviceId] = useState('');
   const [stream, setStream] = useState(null);
   const [cameraType, setCameraType] = useState('WEBCAM'); // WEBCAM or IP_CAM
-  const [ipCamUrl, setIpCamUrl] = useState('https://10.77.191.142:4747');
+  const [ipCamUrl, setIpCamUrl] = useState('http://10.232.74.142:4747/video');
 
   // Scan state
   const [isScanning, setIsScanning] = useState(false);
@@ -65,10 +83,14 @@ export default function App() {
     rmssd: 0,
     sdnn: 0,
     blinkCount: 0,
+    blinkRate: 0,
+    stress_score: 0,
+    stress_label: 'CALIBRATING...',
+    confidence: 100,
     talking: 'NO',
     expression: 'CALM / BASELINE',
-    signalQuality: 0,
-    isLowConfidence: true
+    signalQuality: 100,
+    isLowConfidence: false
   });
   const [waveform, setWaveform] = useState([]);
   const [history, setHistory] = useState([]);
@@ -158,7 +180,7 @@ export default function App() {
     setUser(null);
     stopScanning();
     setView('LOGIN');
-    setAuthMode('FACE_LOGIN');
+    setAuthMode('EMAIL_LOGIN');
   };
 
   // Fetch device inputs
@@ -453,71 +475,55 @@ export default function App() {
 
     faceMeshRef.current = faceMesh;
 
-    if (cameraType === 'IP_CAM') {
-      try {
-        let targetUrl = ipCamUrl;
-        if (!targetUrl.endsWith('/video') && !targetUrl.endsWith('/video.force') && !targetUrl.endsWith('/mjpeg')) {
-          targetUrl = targetUrl.replace(/\/$/, '') + '/video';
-        }
-        const proxiedUrl = `${SERVER_URL}/api/droidcam-proxy?url=${encodeURIComponent(targetUrl)}`;
-        addSystemLog(`Linking IP Camera Proxy: ${targetUrl}`, "info");
-        
-        scanningRef.current = false;
-        ipLoopActiveRef.current = true;
-        if (ipImgRef.current) {
-          ipImgRef.current.src = proxiedUrl;
-        }
+    // For authentication/login page: ALWAYS use the local laptop webcam
+    try {
+      // 1. Request camera permission first with a generic video request so labels are populated
+      let mediaStream = await navigator.mediaDevices.getUserMedia({ video: true });
+      
+      // 2. Once permission is active, enumerate devices to find the built-in camera
+      const devList = await navigator.mediaDevices.enumerateDevices();
+      const videoDevs = devList.filter(d => d.kind === 'videoinput');
+      
+      // 3. Find the first video device that does NOT contain "droidcam" or "virtual"
+      let targetDevice = videoDevs.find(d => {
+        const name = (d.label || '').toLowerCase();
+        return name && !name.includes('droidcam') && !name.includes('virtual');
+      });
 
-        const ipScanLoop = async () => {
-          if (!ipLoopActiveRef.current) return;
-          if (ipImgRef.current && ipImgRef.current.complete && ipImgRef.current.naturalWidth > 0) {
-            try {
-              await faceMesh.send({ image: ipImgRef.current });
-            } catch (err) {
-              console.error("IP Cam FaceMesh send error:", err);
-            }
+      // If we found a specific non-DroidCam camera, stop the temp stream and open the specific one
+      if (targetDevice) {
+        const currentTrack = mediaStream.getVideoTracks()[0];
+        const currentSettings = currentTrack ? currentTrack.getSettings() : {};
+        if (currentSettings.deviceId !== targetDevice.deviceId) {
+          mediaStream.getTracks().forEach(t => t.stop());
+          mediaStream = await navigator.mediaDevices.getUserMedia({
+            video: { deviceId: { exact: targetDevice.deviceId } }
+          });
+        }
+      }
+
+      setStream(mediaStream);
+      
+      if (videoRef.current) {
+        videoRef.current.srcObject = mediaStream;
+      }
+
+      const camera = new Camera(videoRef.current, {
+        onFrame: async () => {
+          if (videoRef.current) {
+            await faceMesh.send({ image: videoRef.current });
           }
-          setTimeout(() => {
-            requestAnimationFrame(ipScanLoop);
-          }, 33);
-        };
-        ipScanLoop();
-        addSystemLog("IP camera authentication mapper active", "success");
-      } catch (err) {
-        console.error("Failed to connect DroidCam:", err);
-        setBiometricStatus('ERROR: DROIDCAM OFFLINE');
-        addSystemLog("Failed to link IP camera stream", "error");
-      }
-    } else {
-      try {
-        const constraints = {
-          video: selectedDeviceId ? { deviceId: { exact: selectedDeviceId } } : true
-        };
-        
-        const mediaStream = await navigator.mediaDevices.getUserMedia(constraints);
-        setStream(mediaStream);
-        
-        if (videoRef.current) {
-          videoRef.current.srcObject = mediaStream;
-        }
-
-        const camera = new Camera(videoRef.current, {
-          onFrame: async () => {
-            if (videoRef.current) {
-              await faceMesh.send({ image: videoRef.current });
-            }
-          },
-          width: 640,
-          height: 480
-        });
-        camera.start();
-        cameraRef.current = camera;
-        addSystemLog("Camera feed initiated for face mesh mapping", "success");
-      } catch (err) {
-        console.error("Failed to start camera for FaceMesh:", err);
-        setBiometricStatus('ERROR: CAMERA ACCESS DENIED');
-        addSystemLog("Failed to capture video feed - verify permissions", "error");
-      }
+        },
+        width: 640,
+        height: 480
+      });
+      camera.start();
+      cameraRef.current = camera;
+      addSystemLog("Laptop camera feed initiated for face mesh mapping", "success");
+    } catch (err) {
+      console.error("Failed to start laptop camera for FaceMesh:", err);
+      setBiometricStatus('ERROR: CAMERA ACCESS DENIED');
+      addSystemLog("Failed to capture laptop webcam feed - verify permissions", "error");
     }
   };
 
@@ -531,6 +537,7 @@ export default function App() {
     const fps = 30;
     const interval = 1000 / fps;
     let lastTime = performance.now();
+    const sessionStart = performance.now();
 
     const pipeFrame = () => {
       // Loop halts if scanning is stopped
@@ -576,7 +583,8 @@ export default function App() {
               socketRef.current.emit('stream_frame_data', {
                 frame: rgbBuffer.buffer,
                 width: 320,
-                height: 240
+                height: 240,
+                timestampUs: Math.round((performance.now() - sessionStart) * 1000)
               });
             }
           }
@@ -833,13 +841,6 @@ export default function App() {
             {/* Mode tabs selector */}
             <div className="login-tabs" style={{ display: 'flex', justifyContent: 'center', marginBottom: '2rem' }}>
               <button 
-                onClick={() => { setAuthMode('FACE_LOGIN'); setAuthError(''); setAuthMessage(''); }} 
-                className={`tab-btn ${authMode === 'FACE_LOGIN' ? 'active' : ''}`}
-                style={{ padding: '0.5rem 1.5rem', fontFamily: 'var(--font-mono)', border: '1px solid var(--border-color)', background: 'transparent', color: '#fff', cursor: 'pointer' }}
-              >
-                FACE SCAN
-              </button>
-              <button 
                 onClick={() => { setAuthMode('EMAIL_LOGIN'); setAuthError(''); setAuthMessage(''); }} 
                 className={`tab-btn ${authMode === 'EMAIL_LOGIN' ? 'active' : ''}`}
                 style={{ padding: '0.5rem 1.5rem', fontFamily: 'var(--font-mono)', border: '1px solid var(--border-color)', background: 'transparent', color: '#fff', cursor: 'pointer' }}
@@ -859,44 +860,18 @@ export default function App() {
             {authError && <div style={{ color: '#ff5252', fontSize: '0.85rem', fontFamily: 'var(--font-mono)', marginBottom: '1rem', textTransform: 'uppercase', textShadow: '0 0 5px rgba(255,82,82,0.4)', textAlign: 'center' }}>{authError}</div>}
             {authMessage && <div style={{ color: '#3ef7a5', fontSize: '0.85rem', fontFamily: 'var(--font-mono)', marginBottom: '1rem', textTransform: 'uppercase', textShadow: '0 0 5px rgba(62,247,165,0.4)', textAlign: 'center' }}>{authMessage}</div>}
 
-            {/* 1. Face Scan Mode (Biometric Verification) */}
-            {authMode === 'FACE_LOGIN' && (
-              <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center' }}>
-                <div className="scanner-container">
-                  <div className="target-bracket tb-tl"></div>
-                  <div className="target-bracket tb-tr"></div>
-                  <div className="target-bracket tb-bl"></div>
-                  <div className="target-bracket tb-br"></div>
-                  
-                  <video ref={videoRef} style={{ display: 'none' }} playsInline muted></video>
-                  <canvas ref={outputCanvasRef} width="640" height="480" style={{ width: '100%', height: '100%', display: 'block', objectFit: 'cover' }}></canvas>
-                  
-                  <div className="cyber-ring ring-1"></div>
-                  <div className="cyber-ring ring-2"></div>
-                  <div className="scanner-overlay"><div className="scan-line"></div></div>
-                </div>
 
-                <div className="calibration-data" style={{ marginTop: '1.5rem', width: '100%' }}>
-                  <div className="cal-row"><span className="label">NEURAL SECURE LINK:</span> <span className="val text-blue">STABLE</span></div>
-                  <div className="cal-row"><span className="label">BIOMETRIC ENGINE:</span> <span className="val text-green">ACTIVE</span></div>
-                </div>
-                
-                <div className="login-status-huge" style={{ marginTop: '1rem', fontFamily: 'var(--font-mono)', color: '#00d9ff', fontSize: '1rem', textShadow: '0 0 8px rgba(0,217,255,0.4)' }}>
-                  {biometricStatus}
-                </div>
-              </div>
-            )}
 
             {/* 2. Email Login Form */}
             {authMode === 'EMAIL_LOGIN' && (
               <form onSubmit={handleEmailLogin} style={{ display: 'flex', flexDirection: 'column', gap: '1.2rem', width: '100%', maxWidth: '350px', margin: '0 auto' }}>
                 <div className="form-group" style={{ display: 'flex', flexDirection: 'column', gap: '0.4rem' }}>
                   <label style={{ fontFamily: 'var(--font-mono)', fontSize: '0.75rem', color: 'var(--text-secondary)' }}>EMAIL ADDRESS</label>
-                  <input type="email" value={loginEmail} onChange={e => setLoginEmail(e.target.value)} required placeholder="agent@vitalsense.ai" className="sci-input" style={{ width: '100%' }} />
+                  <input type="email" value={loginEmail} onChange={e => setLoginEmail(e.target.value)} required placeholder="Email / Username" autoComplete="off" className="sci-input" style={{ width: '100%' }} />
                 </div>
                 <div className="form-group" style={{ display: 'flex', flexDirection: 'column', gap: '0.4rem' }}>
                   <label style={{ fontFamily: 'var(--font-mono)', fontSize: '0.75rem', color: 'var(--text-secondary)' }}>SECURE PASSWORD</label>
-                  <input type="password" value={loginPassword} onChange={e => setLoginPassword(e.target.value)} required placeholder="••••••••" className="sci-input" style={{ width: '100%' }} />
+                  <input type="password" value={loginPassword} onChange={e => setLoginPassword(e.target.value)} required placeholder="Password" autoComplete="new-password" className="sci-input" style={{ width: '100%' }} />
                 </div>
                 <button type="submit" className="action-btn" style={{ marginTop: '1rem', padding: '0.7rem', fontSize: '1rem', width: '100%' }}>
                   AUTHENTICATE CREDENTIALS
@@ -909,15 +884,15 @@ export default function App() {
               <form onSubmit={handleRegister} style={{ display: 'flex', flexDirection: 'column', gap: '1rem', width: '100%', maxWidth: '350px', margin: '0 auto' }}>
                 <div className="form-group" style={{ display: 'flex', flexDirection: 'column', gap: '0.3rem' }}>
                   <label style={{ fontFamily: 'var(--font-mono)', fontSize: '0.7rem', color: 'var(--text-secondary)' }}>FULL NAME</label>
-                  <input type="text" value={regName} onChange={e => setRegName(e.target.value)} required placeholder="John Doe" className="sci-input" style={{ width: '100%' }} />
+                  <input type="text" value={regName} onChange={e => setRegName(e.target.value)} required placeholder="Full Name" autoComplete="off" className="sci-input" style={{ width: '100%' }} />
                 </div>
                 <div className="form-group" style={{ display: 'flex', flexDirection: 'column', gap: '0.3rem' }}>
                   <label style={{ fontFamily: 'var(--font-mono)', fontSize: '0.7rem', color: 'var(--text-secondary)' }}>EMAIL ADDRESS</label>
-                  <input type="email" value={regEmail} onChange={e => setRegEmail(e.target.value)} required placeholder="john@vitalsense.ai" className="sci-input" style={{ width: '100%' }} />
+                  <input type="email" value={regEmail} onChange={e => setRegEmail(e.target.value)} required placeholder="Email Address" autoComplete="off" className="sci-input" style={{ width: '100%' }} />
                 </div>
                 <div className="form-group" style={{ display: 'flex', flexDirection: 'column', gap: '0.3rem' }}>
                   <label style={{ fontFamily: 'var(--font-mono)', fontSize: '0.7rem', color: 'var(--text-secondary)' }}>PASSWORD</label>
-                  <input type="password" value={regPassword} onChange={e => setRegPassword(e.target.value)} required placeholder="••••••••" className="sci-input" style={{ width: '100%' }} />
+                  <input type="password" value={regPassword} onChange={e => setRegPassword(e.target.value)} required placeholder="Password" autoComplete="new-password" className="sci-input" style={{ width: '100%' }} />
                 </div>
 
                 {/* Biometric camera enrollment section */}
@@ -945,56 +920,7 @@ export default function App() {
               </form>
             )}
 
-            {/* Camera Select dropdown */}
-            {(authMode === 'FACE_LOGIN' || authMode === 'REGISTER') && (
-              <div style={{ marginTop: '1.5rem', display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '0.6rem' }}>
-                <div style={{ display: 'flex', gap: '0.5rem', marginBottom: '0.2rem' }}>
-                  <button 
-                    type="button"
-                    onClick={() => { cleanupCamera(); setCameraType('WEBCAM'); }}
-                    className={`action-btn ${cameraType === 'WEBCAM' ? 'active' : ''}`}
-                    style={{ padding: '0.3rem 0.8rem', fontSize: '0.7rem', borderColor: cameraType === 'WEBCAM' ? '#00d9ff' : 'var(--border-color)', color: '#fff', background: cameraType === 'WEBCAM' ? 'rgba(0,217,255,0.15)' : 'transparent' }}
-                  >
-                    WEBCAM SENSOR
-                  </button>
-                  <button 
-                    type="button"
-                    onClick={() => { cleanupCamera(); setCameraType('IP_CAM'); }}
-                    className={`action-btn ${cameraType === 'IP_CAM' ? 'active' : ''}`}
-                    style={{ padding: '0.3rem 0.8rem', fontSize: '0.7rem', borderColor: cameraType === 'IP_CAM' ? '#00d9ff' : 'var(--border-color)', color: '#fff', background: cameraType === 'IP_CAM' ? 'rgba(0,217,255,0.15)' : 'transparent' }}
-                  >
-                    DROIDCAM IP
-                  </button>
-                </div>
 
-                {cameraType === 'WEBCAM' ? (
-                  devices.length > 0 && (
-                    <select 
-                      value={selectedDeviceId} 
-                      onChange={e => setSelectedDeviceId(e.target.value)} 
-                      className="sci-input"
-                      style={{ width: '250px', fontSize: '0.8rem', padding: '0.3rem' }}
-                    >
-                      {devices.map((d, idx) => (
-                        <option key={d.deviceId} value={d.deviceId}>{d.label || `Camera ${idx + 1}`}</option>
-                      ))}
-                    </select>
-                  )
-                ) : (
-                  <div style={{ display: 'flex', flexDirection: 'column', gap: '0.4rem', width: '250px' }}>
-                    <label style={{ fontFamily: 'var(--font-mono)', fontSize: '0.65rem', color: 'var(--text-secondary)', textAlign: 'center' }}>INPUT DROIDCAM CLIENT IP ADDRESS</label>
-                    <input 
-                      type="text" 
-                      value={ipCamUrl} 
-                      onChange={e => setIpCamUrl(e.target.value)} 
-                      placeholder="https://10.77.191.142:4747" 
-                      className="sci-input"
-                      style={{ width: '100%', fontSize: '0.8rem', padding: '0.3rem', textAlign: 'center' }}
-                    />
-                  </div>
-                )}
-              </div>
-            )}
 
             {/* Offline Bypass Override */}
             <button 
@@ -1113,7 +1039,7 @@ export default function App() {
                               type="text" 
                               value={ipCamUrl}
                               onChange={e => setIpCamUrl(e.target.value)}
-                              placeholder="https://10.77.191.142:4747"
+                              placeholder="http://10.232.74.142:4747/video"
                               className="sci-input"
                               disabled={isScanning}
                               style={{ padding: '0.1rem 0.3rem', fontSize: '0.7rem', width: '170px', background: 'rgba(0,0,0,0.6)', border: '1px solid rgba(0,217,255,0.3)', color: '#00d9ff', textAlign: 'center', height: '26px' }}
@@ -1123,6 +1049,31 @@ export default function App() {
                       </div>
                       
                       <div className="camera-wrapper" style={{ display: 'flex', flex: 1, position: 'relative', overflow: 'hidden' }}>
+                        {isScanning && (vitals.confidence < 50 || vitals.signalQuality < 50) && (
+                          <div style={{
+                            position: 'absolute',
+                            top: '40px',
+                            left: '10px',
+                            right: '10px',
+                            background: 'rgba(255, 82, 82, 0.9)',
+                            border: '1px solid #ff5252',
+                            color: '#fff',
+                            fontSize: '0.75rem',
+                            padding: '0.4rem',
+                            borderRadius: '4px',
+                            textAlign: 'center',
+                            zIndex: 10,
+                            display: 'flex',
+                            alignItems: 'center',
+                            justifyContent: 'center',
+                            gap: '0.4rem',
+                            fontFamily: 'var(--font-mono)',
+                            animation: 'pulseAlert 1.5s infinite'
+                          }}>
+                            <AlertTriangle size={12} />
+                            <span>LOW CONFIDENCE: ADJUST LIGHTING / HOLD STILL</span>
+                          </div>
+                        )}
                         <div className="hud-laser"></div>
                         <div className="hud-floating-label" style={{ top: '10px', left: '10px' }} id="hudDetectStatus">
                           {isScanning ? (vitals.isLowConfidence ? 'SEARCHING SKIN...' : 'SIGNAL SYNC LOCKED') : 'SYSTEM OFFLINE'}
@@ -1168,75 +1119,155 @@ export default function App() {
                     </div>
                   </div>
 
-                  {/* Middle Column: Core Vitals (Heart Rate, Respiration Rate, SpO2, waveform) */}
+                  {/* Middle Column: Core Vitals (Heart Rate, Respiration Rate, SpO2, waveform, ML additions) */}
                   <div className="col-middle">
-                    {/* Heart Rate Display */}
-                    <div className="sci-panel panel-hr">
-                      <div className="panel-header">
-                        <div className="header-title">
-                          <Heart size={14} className="icon-red" />
-                          HEART RATE TELEMETRY
+                    {/* Vitals Sub-Grid Container */}
+                    <div className="vitals-grid-container" style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '1rem', flex: 'none' }}>
+                      
+                      {/* Heart Rate Display */}
+                      <div className="sci-panel panel-hr" style={{ flex: 'none', margin: 0 }}>
+                        <div className="panel-header" style={{ padding: '0.6rem 0.8rem' }}>
+                          <div className="header-title" style={{ fontSize: '0.75rem' }}>
+                            <Heart size={14} className="icon-red" />
+                            HEART RATE
+                          </div>
+                          <div className="dots">...</div>
                         </div>
-                        <div className="dots">...</div>
+                        <div className="panel-body" style={{ padding: '0.4rem 0.8rem 0.8rem 0.8rem' }}>
+                          <div className="readout" style={{ marginBottom: '0.2rem' }}>
+                            <span className="value text-red" style={{ fontFamily: 'var(--font-numeric)', fontSize: '2rem' }}>
+                              {vitals.heartRate > 0 ? vitals.heartRate : '--'}
+                            </span>
+                            <span className="unit" style={{ fontSize: '0.8rem', marginLeft: '0.2rem' }}>BPM</span>
+                          </div>
+                          <div style={{ fontSize: '0.6rem', color: 'var(--text-secondary)', fontFamily: 'var(--font-mono)' }}>
+                            rPPG ROLLING ESTIMATE
+                          </div>
+                        </div>
                       </div>
-                      <div className="panel-body">
-                        <div className="readout">
-                          <span className="value text-red" style={{ fontFamily: 'var(--font-numeric)' }}>
-                            {vitals.heartRate > 0 ? vitals.heartRate : '--'}
-                          </span>
-                          <span className="unit">BPM</span>
-                        </div>
-                        <div style={{ fontSize: '0.7rem', color: 'var(--text-secondary)', fontFamily: 'var(--font-mono)', marginTop: '0.2rem' }}>
-                          rPPG ROLLING CALCULATION (12S WINDOW)
-                        </div>
-                      </div>
-                    </div>
 
-                    {/* Respiration Rate Display */}
-                    <div className="sci-panel panel-rr">
-                      <div className="panel-header">
-                        <div className="header-title">
-                          <Wind size={14} style={{ color: '#3ef7a5' }} />
-                          RESPIRATORY METRICS
+                      {/* Cognitive Stress Level Display */}
+                      <div className="sci-panel panel-stress-level" style={{ flex: 'none', margin: 0 }}>
+                        <div className="panel-header" style={{ padding: '0.6rem 0.8rem' }}>
+                          <div className="header-title" style={{ fontSize: '0.75rem' }}>
+                            <Brain size={14} style={{ color: '#ff5252' }} />
+                            STRESS PROFILE
+                          </div>
+                          <div className="dots">...</div>
                         </div>
-                        <div className="dots">...</div>
+                        <div className="panel-body" style={{ padding: '0.4rem 0.8rem 0.8rem 0.8rem' }}>
+                          <div className="readout" style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-start' }}>
+                            <span className="value text-red" style={{ fontFamily: 'var(--font-numeric)', fontSize: '2rem', lineHeight: 1 }}>
+                              {vitals.heartRate > 0 && (vitals.stress_score !== undefined && vitals.stress_score > 0 ? vitals.stress_score : (vitals.stress > 0 ? vitals.stress : '--')) || '--'}
+                            </span>
+                            <div style={{
+                              fontSize: '0.55rem',
+                              padding: '0.1rem 0.4rem',
+                              marginTop: '0.3rem',
+                              borderRadius: '3px',
+                              fontWeight: 'bold',
+                              fontFamily: 'var(--font-hud)',
+                              border: '1px solid',
+                              background: getStressColor(vitals.heartRate > 0 ? (vitals.stress_label || 'CALM / BASELINE') : '--').bg,
+                              color: getStressColor(vitals.heartRate > 0 ? (vitals.stress_label || 'CALM / BASELINE') : '--').fg,
+                              borderColor: getStressColor(vitals.heartRate > 0 ? (vitals.stress_label || 'CALM / BASELINE') : '--').fg
+                            }}>
+                              {vitals.heartRate > 0 ? (vitals.stress_label || 'CALM / BASELINE') : '--'}
+                            </div>
+                          </div>
+                        </div>
                       </div>
-                      <div className="panel-body">
-                        <div className="readout">
-                          <span className="value text-green" style={{ fontFamily: 'var(--font-numeric)' }}>
-                            {vitals.respirationRate > 0 ? vitals.respirationRate : '--'}
-                          </span>
-                          <span className="unit">RPM</span>
-                        </div>
-                        <div style={{ fontSize: '0.7rem', color: 'var(--text-secondary)', fontFamily: 'var(--font-mono)', marginTop: '0.2rem' }}>
-                          CHEST SPECTRA ESTIMATE (30S WINDOW)
-                        </div>
-                      </div>
-                    </div>
 
-                    {/* SpO2 Display */}
-                    <div className="sci-panel panel-spo2" style={{ flex: 'none' }}>
-                      <div className="panel-header">
-                        <div className="header-title">
-                          <Shield size={14} style={{ color: '#00d9ff' }} />
-                          BLOOD OXYGEN LEVEL (SpO2)
+                      {/* Respiration Rate Display */}
+                      <div className="sci-panel panel-rr" style={{ flex: 'none', margin: 0 }}>
+                        <div className="panel-header" style={{ padding: '0.6rem 0.8rem' }}>
+                          <div className="header-title" style={{ fontSize: '0.75rem' }}>
+                            <Wind size={14} style={{ color: '#3ef7a5' }} />
+                            RESPIRATORY RATE
+                          </div>
+                          <div className="dots">...</div>
                         </div>
-                        <div className="dots">...</div>
+                        <div className="panel-body" style={{ padding: '0.4rem 0.8rem 0.8rem 0.8rem' }}>
+                          <div className="readout" style={{ marginBottom: '0.2rem' }}>
+                            <span className="value text-green" style={{ fontFamily: 'var(--font-numeric)', fontSize: '2rem' }}>
+                              {vitals.respirationRate > 0 ? vitals.respirationRate : '--'}
+                            </span>
+                            <span className="unit" style={{ fontSize: '0.8rem', marginLeft: '0.2rem' }}>RPM</span>
+                          </div>
+                          <div style={{ fontSize: '0.6rem', color: 'var(--text-secondary)', fontFamily: 'var(--font-mono)' }}>
+                            CHEST SPECTRA WINDOW
+                          </div>
+                        </div>
                       </div>
-                      <div className="panel-body">
-                        <div className="readout">
-                          <span className="value text-blue" style={{ fontFamily: 'var(--font-numeric)' }}>
-                            {vitals.spo2 > 0 ? `${vitals.spo2}%` : '--'}
-                          </span>
+
+                      {/* Blink Rate Display */}
+                      <div className="sci-panel panel-blink-rate" style={{ flex: 'none', margin: 0 }}>
+                        <div className="panel-header" style={{ padding: '0.6rem 0.8rem' }}>
+                          <div className="header-title" style={{ fontSize: '0.75rem' }}>
+                            <Eye size={14} style={{ color: '#ffaa00' }} />
+                            BLINK RATE
+                          </div>
+                          <div className="dots">...</div>
                         </div>
-                        <div style={{ fontSize: '0.65rem', color: 'var(--text-secondary)', fontFamily: 'var(--font-mono)', marginTop: '0.2rem' }}>
-                          EXPERIMENTAL ESTIMATE (UNREGULATED REFERENCE)
+                        <div className="panel-body" style={{ padding: '0.4rem 0.8rem 0.8rem 0.8rem' }}>
+                          <div className="readout" style={{ marginBottom: '0.2rem' }}>
+                            <span className="value" style={{ color: '#ffaa00', fontFamily: 'var(--font-numeric)', fontSize: '2rem' }}>
+                              {vitals.heartRate > 0 && vitals.blinkRate !== undefined ? vitals.blinkRate : '--'}
+                            </span>
+                            <span className="unit" style={{ fontSize: '0.8rem', marginLeft: '0.2rem' }}>BPM</span>
+                          </div>
+                          <div style={{ fontSize: '0.6rem', color: 'var(--text-secondary)', fontFamily: 'var(--font-mono)' }}>
+                            EYE OCCLUSION TALLY
+                          </div>
                         </div>
                       </div>
+
+                      {/* SpO2 Display */}
+                      <div className="sci-panel panel-spo2" style={{ flex: 'none', margin: 0 }}>
+                        <div className="panel-header" style={{ padding: '0.6rem 0.8rem' }}>
+                          <div className="header-title" style={{ fontSize: '0.75rem' }}>
+                            <Shield size={14} style={{ color: '#00d9ff' }} />
+                            BLOOD OXYGEN (SpO2)
+                          </div>
+                          <div className="dots">...</div>
+                        </div>
+                        <div className="panel-body" style={{ padding: '0.4rem 0.8rem 0.8rem 0.8rem' }}>
+                          <div className="readout" style={{ marginBottom: '0.2rem' }}>
+                            <span className="value text-blue" style={{ fontFamily: 'var(--font-numeric)', fontSize: '2rem' }}>
+                              {vitals.spo2 > 0 ? `${vitals.spo2}%` : '--'}
+                            </span>
+                          </div>
+                          <div style={{ fontSize: '0.6rem', color: 'var(--text-secondary)', fontFamily: 'var(--font-mono)' }}>
+                            AC/DC RED RATIO-OF-RATIOS
+                          </div>
+                        </div>
+                      </div>
+
+                      {/* Signal Confidence Display */}
+                      <div className="sci-panel panel-confidence" style={{ flex: 'none', margin: 0 }}>
+                        <div className="panel-header" style={{ padding: '0.6rem 0.8rem' }}>
+                          <div className="header-title" style={{ fontSize: '0.75rem' }}>
+                            <Shield size={14} style={{ color: '#3ef7a5' }} />
+                            QUALITY INDEX
+                          </div>
+                          <div className="dots">...</div>
+                        </div>
+                        <div className="panel-body" style={{ padding: '0.4rem 0.8rem 0.8rem 0.8rem' }}>
+                          <div className="readout" style={{ marginBottom: '0.2rem' }}>
+                            <span className="value" style={{ color: vitals.confidence < 50 ? '#ff5252' : '#3ef7a5', fontFamily: 'var(--font-numeric)', fontSize: '2rem' }}>
+                              {vitals.confidence !== undefined ? `${Math.round(vitals.confidence)}%` : `${vitals.signalQuality}%`}
+                            </span>
+                          </div>
+                          <div className="progress-track" style={{ height: '3px', background: 'rgba(0,217,255,0.1)', marginTop: '0.2rem', width: '100%' }}>
+                            <div className="progress-fill" style={{ width: `${vitals.confidence !== undefined ? vitals.confidence : vitals.signalQuality}%`, backgroundColor: vitals.confidence < 50 ? '#ff5252' : '#3ef7a5' }}></div>
+                          </div>
+                        </div>
+                      </div>
+
                     </div>
 
                     {/* Arterial Waveform Display */}
-                    <div className="sci-panel panel-art" style={{ flex: 1 }}>
+                    <div className="sci-panel panel-art" style={{ flex: 1, minHeight: '120px' }}>
                       <div className="panel-header">
                         <div className="header-title">
                           <Activity size={14} style={{ color: '#00d9ff' }} />
@@ -1244,7 +1275,7 @@ export default function App() {
                         </div>
                         <div className="dots">...</div>
                       </div>
-                      <div className="panel-body art-body" style={{ flex: 1, minHeight: '120px' }}>
+                      <div className="panel-body art-body" style={{ flex: 1, minHeight: '100px' }}>
                         <div className="wave-container" style={{ height: '100%' }}>
                           <canvas ref={chartCanvasRef}></canvas>
                           <div className="y-axis">
@@ -1295,17 +1326,17 @@ export default function App() {
                       <div className="face-grid" style={{ marginBottom: '1rem' }}>
                         <div className="face-box">
                           <div className="label">BLINK TALLY</div>
-                          <div className="val text-blue" style={{ fontFamily: 'var(--font-numeric)' }}>{vitals.blinkCount}</div>
+                          <div className="val text-blue" style={{ fontFamily: 'var(--font-numeric)' }}>{vitals.heartRate > 0 ? vitals.blinkCount : '--'}</div>
                         </div>
                         <div className="face-box">
                           <div className="label">SPEECH DETECTED</div>
-                          <div className="val text-green" style={{ fontFamily: 'var(--font-mono)', fontSize: '1.2rem' }}>{vitals.talking}</div>
+                          <div className="val text-green" style={{ fontFamily: 'var(--font-mono)', fontSize: '1.2rem' }}>{vitals.heartRate > 0 ? vitals.talking : '--'}</div>
                         </div>
                       </div>
                       <div style={{ padding: '0 1rem 1rem 1rem' }}>
                         <div className="label" style={{ fontFamily: 'var(--font-mono)', fontSize: '0.7rem', color: 'var(--text-secondary)', marginBottom: '0.3rem' }}>EXPRESSION PROFILE</div>
                         <div className="text-green" style={{ fontFamily: 'var(--font-hud)', fontSize: '1.3rem', fontWeight: 500, letterSpacing: '1px' }}>
-                          {vitals.expression}
+                          {vitals.heartRate > 0 ? vitals.expression : 'NO FACE DETECTED'}
                         </div>
                       </div>
                     </div>
@@ -1365,6 +1396,8 @@ export default function App() {
                             <th style={{ padding: '0.8rem' }}>STRESS INDEX</th>
                             <th style={{ padding: '0.8rem' }}>RMSSD</th>
                             <th style={{ padding: '0.8rem' }}>BLINKS</th>
+                            <th style={{ padding: '0.8rem' }}>BLINK RATE</th>
+                            <th style={{ padding: '0.8rem' }}>CONF.</th>
                             <th style={{ padding: '0.8rem', textAlign: 'center' }}>CLINICAL RECORD</th>
                           </tr>
                         </thead>
@@ -1378,6 +1411,8 @@ export default function App() {
                               <td style={{ padding: '0.8rem', color: log.stress > 150 ? '#ff5252' : '#3ef7a5' }}>{log.stress}</td>
                               <td style={{ padding: '0.8rem', color: '#00d9ff' }}>{log.rmssd} ms</td>
                               <td style={{ padding: '0.8rem' }}>{log.blinkCount}</td>
+                              <td style={{ padding: '0.8rem', color: '#ffaa00' }}>{log.blinkRate || 0} blinks/m</td>
+                              <td style={{ padding: '0.8rem', color: (log.confidence || 0) < 50 ? '#ff5252' : '#3ef7a5' }}>{log.confidence || 0}%</td>
                               <td style={{ padding: '0.8rem', textAlign: 'center' }}>
                                 <a 
                                   href={`${SERVER_URL}/api/report?token=${token}&sessionId=${log._id}`} 
