@@ -42,15 +42,37 @@ class RPPG1DCNN(nn.Module):
 CHECKPOINT_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), "training", "checkpoints")
 ONNX_PATH = os.path.join(CHECKPOINT_DIR, "rppg_cnn.onnx")
 PTH_PATH = os.path.join(CHECKPOINT_DIR, "rppg_cnn.pth")
+PHYSNET_PTH_PATH = os.path.join(CHECKPOINT_DIR, "rppg_physnet_ubfc.pt")
 
 class RPPGEngine:
     def __init__(self):
         self.session = None
         self.model = None
+        self.physnet = None
         self.use_pytorch = False
+        self.use_physnet = False
         self.load_model()
         
     def load_model(self):
+        # 1. First priority: Check if pre-trained PhysNet is available
+        if os.path.exists(PHYSNET_PTH_PATH):
+            try:
+                from app.models.physnet import PhysNet
+                self.physnet = PhysNet(width=32)
+                checkpoint = torch.load(PHYSNET_PTH_PATH, map_location=torch.device('cpu'))
+                if isinstance(checkpoint, dict) and 'state_dict' in checkpoint:
+                    self.physnet.load_state_dict(checkpoint['state_dict'])
+                else:
+                    self.physnet.load_state_dict(checkpoint)
+                self.physnet.eval()
+                self.use_physnet = True
+                logger.info(f"Loaded pre-trained PhysNet model from: {PHYSNET_PTH_PATH}")
+                return
+            except Exception as e:
+                logger.error(f"Failed to load pre-trained PhysNet model: {e}")
+                self.use_physnet = False
+
+        # 2. Second priority: 1D Temporal CNN
         if os.path.exists(PTH_PATH):
             try:
                 self.model = RPPG1DCNN()
@@ -70,6 +92,53 @@ class RPPGEngine:
                 logger.error(f"Failed to load ONNX rPPG model: {e}")
         else:
             logger.info("No trained rPPG checkpoints found. Running high-precision rules-based POS fallback.")
+
+    def estimate_vitals_physnet(self, face_crops, fps=30.0):
+        """
+        Estimates vitals using 3D-CNN PhysNet from raw 32x32 face frames.
+        face_crops: list of [32, 32, 3] RGB face crops of length T.
+        """
+        T = len(face_crops)
+        if T < 60:
+            return 72.0, [], [0.0] * 150
+
+        # Stack into numpy array of shape (T, 32, 32, 3) and normalize to [0, 1]
+        stacked = np.array(face_crops, dtype=np.float32) / 255.0
+
+        # Transpose from (T, H, W, C) to (C, T, H, W)
+        input_signal = np.transpose(stacked, (3, 0, 1, 2))
+        input_tensor = torch.tensor(np.expand_dims(input_signal, axis=0), dtype=torch.float32)
+
+        try:
+            with torch.no_grad():
+                pred_wave = self.physnet(input_tensor).squeeze(0).cpu().numpy()
+            
+            from app.models.physnet import hr_from_wave
+            hr_bpm = hr_from_wave(pred_wave, fs=fps)
+            if np.isnan(hr_bpm) or hr_bpm < 45.0 or hr_bpm > 180.0:
+                hr_bpm = 72.0
+                
+            # Normalize waveform for visualization
+            w_min, w_max = np.min(pred_wave), np.max(pred_wave)
+            if w_max - w_min > 1e-6:
+                bvp_norm = (pred_wave - w_min) / (w_max - w_min)
+            else:
+                bvp_norm = pred_wave
+                
+            # Beat peak detection for HRV
+            beat_peaks_ms = []
+            for i in range(1, T - 1):
+                if bvp_norm[i] > bvp_norm[i-1] and bvp_norm[i] > bvp_norm[i+1] and bvp_norm[i] > 0.4:
+                    peak_ms = (i / fps) * 1000.0
+                    beat_peaks_ms.append(peak_ms)
+                    
+            return round(float(hr_bpm), 1), beat_peaks_ms, bvp_norm.tolist()
+            
+        except Exception as e:
+            logger.error(f"PhysNet inference failed, falling back: {e}")
+            # Fallback: Extract RGB averages from face_crops
+            rgb_signals = [np.mean(crop, axis=(0,1)).tolist() for crop in face_crops]
+            return self.estimate_vitals(rgb_signals, fps=fps)
 
     def estimate_vitals(self, rgb_signals, fps=30.0):
         """
@@ -185,3 +254,9 @@ engine = RPPGEngine()
 
 def calculate_pulse(rgb_signals, fps=30.0):
     return engine.estimate_vitals(rgb_signals, fps)
+
+def calculate_pulse_physnet(face_crops, fps=30.0):
+    return engine.estimate_vitals_physnet(face_crops, fps)
+
+def is_physnet_active():
+    return engine.use_physnet

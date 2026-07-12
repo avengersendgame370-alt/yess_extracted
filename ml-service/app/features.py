@@ -96,7 +96,7 @@ def calculate_ear(eye_landmarks):
 def extract_face_features(frame_rgb):
     """
     Extracts RGB mean from cheeks/forehead ROI, computes average EAR,
-    and returns metrics tracking face presence, mouth aspect ratio, landmark stability, and face bounding box.
+    and returns metrics tracking face presence, mouth aspect ratio, and landmark stability.
     """
     h, w, c = frame_rgb.shape
     
@@ -114,7 +114,6 @@ def extract_face_features(frame_rgb):
                 if len(faces) > 0:
                     # Pick the largest face detected
                     (x, y, w_face, h_face) = max(faces, key=lambda f: f[2] * f[3])
-                    face_bbox = (int(x), int(y), int(w_face), int(h_face))
                     
                     # 1. Extract Forehead and Cheek ROIs within the face box
                     # Forehead ROI: top 20% of the face, middle 50% width
@@ -166,7 +165,14 @@ def extract_face_features(frame_rgb):
                     else:
                         mar = 0.0
                         
-                    return avg_roi_rgb, ear, mar, 0.01, True, face_bbox
+                    y_f1, y_f2 = max(0, y), min(h, y + h_face)
+                    x_f1, x_f2 = max(0, x), min(w, x + w_face)
+                    face_crop = frame_rgb[y_f1:y_f2, x_f1:x_f2]
+                    try:
+                        face_resized = cv2.resize(face_crop, (32, 32)).tolist()
+                    except Exception:
+                        face_resized = None
+                    return avg_roi_rgb, ear, mar, 0.01, True, face_resized
             except Exception as e:
                 logger.error(f"OpenCV Haar Cascade processing error: {e}")
                 
@@ -219,46 +225,15 @@ def extract_face_features(frame_rgb):
     nose_tip = landmarks[4]
     jitter = float(np.std([nose_tip.x, nose_tip.y, nose_tip.z]))
     
-    # Construct face bounding box from all landmarks boundary envelope
-    xs = [pt[0] for pt in coords]
-    ys = [pt[1] for pt in coords]
-    x_min, x_max = int(min(xs)), int(max(xs))
-    y_min, y_max = int(min(ys)), int(max(ys))
-    face_bbox = (x_min, y_min, x_max - x_min, y_max - y_min)
-    
-    return avg_roi_rgb, avg_ear, mar, jitter, True, face_bbox
-
-
-def crop_face(frame_rgb: np.ndarray, face_bbox: tuple, padding: float = 0.15) -> np.ndarray:
-    """
-    Crops a padded face region from the RGB frame and normalizes contrast via YCrCb luma equalization.
-    """
-    if face_bbox is None:
-        return None
-        
-    h_img, w_img, _ = frame_rgb.shape
-    x, y, w_box, h_box = face_bbox
-    
-    # Proportional padding
-    pad_w = int(w_box * padding)
-    pad_h = int(h_box * padding)
-    
-    x1 = max(0, x - pad_w)
-    y1 = max(0, y - pad_h)
-    x2 = min(w_img, x + w_box + pad_w)
-    y2 = min(h_img, y + h_box + pad_h)
-    
-    crop = frame_rgb[y1:y2, x1:x2]
-    if crop.size == 0:
-        return None
-        
+    # Crop face and resize for PhysNet (32x32)
+    x_coords = [c[0] for c in coords]
+    y_coords = [c[1] for c in coords]
+    xmin, xmax = int(max(0, min(x_coords))), int(min(w, max(x_coords)))
+    ymin, ymax = int(max(0, min(y_coords))), int(min(h, max(y_coords)))
+    face_crop = frame_rgb[ymin:ymax, xmin:xmax]
     try:
-        # Equalize contrast on the luma (Y) channel in YCrCb color space
-        ycrcb = cv2.cvtColor(crop, cv2.COLOR_RGB2YCrCb)
-        ycrcb[:, :, 0] = cv2.equalizeHist(ycrcb[:, :, 0])
-        equalized_rgb = cv2.cvtColor(ycrcb, cv2.COLOR_YCrCb2RGB)
-        return equalized_rgb
-    except Exception as e:
-        logger.error(f"Error equalizing contrast on face crop: {e}")
-        return crop
-
+        face_resized = cv2.resize(face_crop, (32, 32)).tolist()
+    except Exception:
+        face_resized = None
+        
+    return avg_roi_rgb, avg_ear, mar, jitter, True, face_resized

@@ -47,6 +47,7 @@ async def vitals_stream(websocket: WebSocket):
     ear_buffer = []
     timestamps = []
     mar_buffer = []
+    face_buffer = []
     
     session_state = {
         "total_blinks": 0,
@@ -65,7 +66,7 @@ async def vitals_stream(websocket: WebSocket):
             if "bytes" in message:
                 raw_bytes = message["bytes"]
                 # Process the incoming raw binary frame and get vitals output
-                result = await process_rolling_stream_inference(raw_bytes, rgb_buffer, ear_buffer, timestamps, session_state, mar_buffer)
+                result = await process_rolling_stream_inference(raw_bytes, rgb_buffer, ear_buffer, timestamps, session_state, mar_buffer, face_buffer)
                 if result:
                     await websocket.send_text(json.dumps(result))
             elif "text" in message:
@@ -75,6 +76,7 @@ async def vitals_stream(websocket: WebSocket):
                     ear_buffer.clear()
                     timestamps.clear()
                     mar_buffer.clear()
+                    face_buffer.clear()
                     session_state["total_blinks"] = 0
                     session_state["start_time"] = time.time()
                     session_state["in_blink"] = False
