@@ -13,6 +13,9 @@ COPY requirements.txt .
 
 RUN pip install --no-cache-dir -r requirements.txt
 
+ENV HF_HOME=/app/.cache/huggingface
+RUN python -c "from transformers import AutoModelForImageClassification, AutoImageProcessor; AutoModelForImageClassification.from_pretrained('trpakov/vit-face-expression'); AutoImageProcessor.from_pretrained('trpakov/vit-face-expression')"
+
 COPY . .
 
 EXPOSE 8001

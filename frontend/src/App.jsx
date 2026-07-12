@@ -1341,18 +1341,31 @@ export default function App() {
                       <div className="face-grid" style={{ marginBottom: '1rem' }}>
                         <div className="face-box">
                           <div className="label">BLINK TALLY</div>
-                          <div className="val text-blue" style={{ fontFamily: 'var(--font-numeric)' }}>{vitals.heartRate > 0 ? vitals.blinkCount : '--'}</div>
+                          <div className="val text-blue" style={{ fontFamily: 'var(--font-numeric)' }}>{isScanning && vitals.faceFound ? vitals.blinkCount : '--'}</div>
                         </div>
                         <div className="face-box">
                           <div className="label">SPEECH DETECTED</div>
-                          <div className="val text-green" style={{ fontFamily: 'var(--font-mono)', fontSize: '1.2rem' }}>{vitals.heartRate > 0 ? vitals.talking : '--'}</div>
+                          <div className={vitals.talking === 'YES' ? "val text-green" : "val"} style={{ fontFamily: 'var(--font-mono)', fontSize: '1.2rem', color: vitals.talking === 'YES' ? '#3ef7a5' : '#888' }}>
+                            {isScanning && vitals.faceFound && (vitals.talking === 'YES' || vitals.talking === 'NO') ? vitals.talking : '--'}
+                          </div>
                         </div>
                       </div>
                       <div style={{ padding: '0 1rem 1rem 1rem' }}>
                         <div className="label" style={{ fontFamily: 'var(--font-mono)', fontSize: '0.7rem', color: 'var(--text-secondary)', marginBottom: '0.3rem' }}>EXPRESSION PROFILE</div>
-                        <div className="text-green" style={{ fontFamily: 'var(--font-hud)', fontSize: '1.3rem', fontWeight: 500, letterSpacing: '1px' }}>
-                          {vitals.heartRate > 0 ? vitals.expression : 'NO FACE DETECTED'}
-                        </div>
+                        {!isScanning || !vitals.faceFound || vitals.expression === 'NO FACE DETECTED' || vitals.expression === 'CALIBRATING...' || vitals.expression === 'ENGINE DOES NOT SUPPORT EXPRESSION ANALYSIS' ? (
+                          <div style={{ fontFamily: 'var(--font-hud)', fontSize: '1.2rem', fontWeight: 500, letterSpacing: '1px', color: '#888' }}>
+                            {!isScanning ? 'NO FACE DETECTED' : (vitals.expression || 'CALIBRATING...')}
+                          </div>
+                        ) : (
+                          <div className="text-green" style={{ fontFamily: 'var(--font-hud)', fontSize: '1.3rem', fontWeight: 500, letterSpacing: '1px', display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+                            <span>{vitals.expression}</span>
+                            {vitals.expressionConfidence !== undefined && vitals.expressionConfidence > 0 && (
+                              <span style={{ fontSize: '0.75rem', color: 'rgba(0, 217, 255, 0.7)', fontWeight: 400, fontFamily: 'var(--font-mono)' }}>
+                                ({Math.round(vitals.expressionConfidence * 100)}%)
+                              </span>
+                            )}
+                          </div>
+                        )}
                       </div>
                     </div>
 

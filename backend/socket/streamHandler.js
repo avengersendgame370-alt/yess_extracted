@@ -74,7 +74,8 @@ module.exports = (io) => {
                 blinkCount: 0,
                 blinkRates: [],
                 stressLabels: [],
-                confidences: []
+                confidences: [],
+                expressions: []
             };
 
             // If ML engine is selected, initialize the WebSocket client to the ML microservice
@@ -105,7 +106,9 @@ module.exports = (io) => {
                             const confidence = parsed.confidence !== undefined ? parsed.confidence : 100;
                             const blinkCount = parsed.blinkCount || 0;
                             const blinkRate = parsed.blinkRate || 0.0;
-                            const stress_label = parsed.stress_label || 'CALM / BASELINE';
+                            const expression = parsed.expression || 'CALM / BASELINE';
+                            const expressionConfidence = parsed.expressionConfidence !== undefined ? parsed.expressionConfidence : 0.0;
+                            const faceFound = parsed.faceFound !== undefined ? parsed.faceFound : false;
                             
                             session.metricsBuffer.blinkCount = blinkCount;
                             
@@ -119,6 +122,7 @@ module.exports = (io) => {
                             session.metricsBuffer.blinkRates.push(blinkRate);
                             session.metricsBuffer.stressLabels.push(stress_label);
                             session.metricsBuffer.confidences.push(confidence);
+                            session.metricsBuffer.expressions.push(expression);
                             
                             // Re-emit directly to front-end in standard payload format
                             socket.emit('vitals_update', {
@@ -134,7 +138,9 @@ module.exports = (io) => {
                                 stress_label,
                                 confidence,
                                 talking: parsed.talking || 'NO',
-                                expression: parsed.expression || 'CALM / BASELINE',
+                                expression,
+                                expressionConfidence,
+                                faceFound,
                                 signalQuality: Math.round(confidence),
                                 isLowConfidence: confidence < 50,
                                 filteredWave: parsed.filteredWave || [],
@@ -242,8 +248,7 @@ module.exports = (io) => {
                                 rmssd,
                                 sdnn,
                                 blinkCount: session.metricsBuffer.blinkCount,
-                                talking: decoded.talking ? 'YES' : 'NO',
-                                expression: decoded.expression || 'CALM / BASELINE',
+                                expression: 'ENGINE DOES NOT SUPPORT EXPRESSION ANALYSIS',
                                 signalQuality: decoded.signalQuality || (confidence > 50 ? 95 : 20),
                                 isLowConfidence: confidence < 50,
                                 filteredWave: decoded.waveform || decoded.arterialPressureWaveform || generateArtWaveSlice(),
@@ -334,7 +339,8 @@ module.exports = (io) => {
                 blinkCount: 0,
                 blinkRates: [],
                 stressLabels: [],
-                confidences: []
+                confidences: [],
+                expressions: []
             };
         });
 
@@ -379,6 +385,23 @@ module.exports = (io) => {
                 try {
                     const avg = (arr) => arr.length > 0 ? arr.reduce((a, b) => a + b, 0) / arr.length : 0;
                     
+                    // Calculate dominant expression
+                    let finalExpression = 'CALM / BASELINE';
+                    if (mb.expressions && mb.expressions.length > 0) {
+                        const validExprs = mb.expressions.filter(e => e !== 'NO FACE DETECTED' && e !== 'CALIBRATING...' && e !== 'UNAVAILABLE');
+                        if (validExprs.length > 0) {
+                            const counts = {};
+                            let maxCount = 0;
+                            for (const expr of validExprs) {
+                                counts[expr] = (counts[expr] || 0) + 1;
+                                if (counts[expr] > maxCount) {
+                                    maxCount = counts[expr];
+                                    finalExpression = expr;
+                                }
+                            }
+                        }
+                    }
+
                     const log = new VitalLog({
                         userId: session.userId,
                         heartRate: Math.round(avg(mb.heartRates)),
@@ -392,7 +415,8 @@ module.exports = (io) => {
                         stressLabel: mb.stressLabels.length > 0 
                             ? mb.stressLabels[mb.stressLabels.length - 1] 
                             : 'CALM / BASELINE',
-                        confidence: Math.round(avg(mb.confidences))
+                        confidence: Math.round(avg(mb.confidences)),
+                        finalExpression: finalExpression
                     });
 
                     await log.save();
@@ -500,8 +524,7 @@ function startMockSession(socket, session) {
             rmssd,
             sdnn,
             blinkCount: session.metricsBuffer.blinkCount,
-            talking,
-            expression,
+            expression: 'ENGINE DOES NOT SUPPORT EXPRESSION ANALYSIS',
             signalQuality: hrSettled ? 96 : 35,
             isLowConfidence: !hrSettled,
             filteredWave: waveform
